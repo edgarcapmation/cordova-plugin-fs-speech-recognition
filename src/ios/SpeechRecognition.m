@@ -189,6 +189,12 @@
         self.recognitionRequest = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
         self.recognitionRequest.shouldReportPartialResults = [[self.command argumentAtIndex:1] boolValue];
 
+        if (@available(iOS 13.0, *)) {
+            if (self.sfSpeechRecognizer.supportsOnDeviceRecognition) {
+                self.recognitionRequest.requiresOnDeviceRecognition = YES;
+            }
+        }
+
         self.speechStartSent = FALSE;
 
         self.recognitionTask = [self.sfSpeechRecognizer recognitionTaskWithRequest:self.recognitionRequest resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
