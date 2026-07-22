@@ -53,9 +53,17 @@
     self.isSpeaking = NO;
     self.silenceTimer = nil;
 
+    AVAudioSessionCategoryOptions options = AVAudioSessionCategoryOptionAllowBluetooth | AVAudioSessionCategoryOptionAllowBluetoothA2DP;
+    if ([self.sessionCategory isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
+        // When audio output is enabled (e.g. UI beeps playing during
+        // recognition), route playback to the built-in speaker instead of the
+        // quiet receiver so the sounds are actually audible.
+        options |= AVAudioSessionCategoryOptionDefaultToSpeaker;
+    }
+
     if(![self.audioSession setCategory:self.sessionCategory
                                   mode:AVAudioSessionModeMeasurement
-                               options:(AVAudioSessionCategoryOptionAllowBluetooth|AVAudioSessionCategoryOptionAllowBluetoothA2DP)
+                               options:options
                                  error:&error]) {
         NSLog(@"[sr] Unable to setCategory: %@", error);
     }
