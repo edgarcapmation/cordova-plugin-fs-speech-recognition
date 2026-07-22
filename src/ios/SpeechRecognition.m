@@ -282,7 +282,20 @@
 
         self.speechStartSent = FALSE;
 
+        // Tag this session. Because this plugin is a singleton, a torn-down
+        // session's task can still fire its result handler late; those stale
+        // callbacks must not leak into whatever session is current now (e.g.
+        // an empty final from the old session poisoning the new one). Capture
+        // the id and bail out of the handler if the session has been superseded.
+        self.sessionId += 1;
+        NSInteger mySession = self.sessionId;
+
         self.recognitionTask = [self.sfSpeechRecognizer recognitionTaskWithRequest:self.recognitionRequest resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
+
+            if (mySession != self.sessionId) {
+                NSLog(@"[sr] Ignoring callback from superseded session %ld (current %ld)", (long)mySession, (long)self.sessionId);
+                return;
+            }
 
             if (error) {
                 NSLog(@"[sr] resultHandler error (%d) %@", (int) error.code, error.description);
@@ -418,9 +431,13 @@
     NSLog(@"[sr] handleSilence()");
     if (self.isSpeaking) {
         self.isSpeaking = NO;
-        dispatch_async(self.audioQueue, ^{
-            [self stopAndRelease];
-        });
+        // Finalize the utterance instead of cancelling it. stopOrAbort calls
+        // endAudio, which makes the recognizer deliver its FINAL result (the
+        // recognized text) through the result handler — that final then
+        // commits and ends the session normally. Previously this called
+        // stopAndRelease, which cancels the task (kLSRErrorDomain 301) and
+        // discards the recognized text, so no final result was ever emitted.
+        [self stopOrAbort];
     }
 }
 
