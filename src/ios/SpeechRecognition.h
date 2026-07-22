@@ -16,6 +16,7 @@
 @property (assign) BOOL resetAudioEngine;
 @property (assign) BOOL sessionActive;
 @property (assign) NSInteger sessionId;
+@property (nonatomic, strong) NSMutableArray *lastAlternatives;
 
 @property (nonatomic, strong) dispatch_queue_t audioQueue;
 @property (nonatomic, strong) NSTimer *silenceTimer;

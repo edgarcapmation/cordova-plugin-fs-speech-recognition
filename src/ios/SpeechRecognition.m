@@ -289,6 +289,7 @@
         // the id and bail out of the handler if the session has been superseded.
         self.sessionId += 1;
         NSInteger mySession = self.sessionId;
+        self.lastAlternatives = nil; // per-session cache of the last non-empty transcription
 
         self.recognitionTask = [self.sfSpeechRecognizer recognitionTaskWithRequest:self.recognitionRequest resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
 
@@ -340,7 +341,27 @@
                         [alternatives addObject:resultDict];
                     }
                 }
-                [self sendResults:@[alternatives]];
+                // On-device recognition can flood kAFAssistantErrorDomain 1101
+                // and then hand back an EMPTY final result, which would drop the
+                // spoken text entirely. We reliably get the text as interims, so
+                // cache the last non-empty result and, if the final comes back
+                // empty, substitute the cached text so the phrase isn't lost.
+                NSString *primaryText = result.bestTranscription.formattedString ?: @"";
+                BOOL hasText = primaryText.length > 0;
+
+                if (hasText) {
+                    self.lastAlternatives = alternatives;
+                    [self sendResults:@[alternatives]];
+                } else if (result.isFinal && self.lastAlternatives.count > 0) {
+                    for (NSMutableDictionary *alt in self.lastAlternatives) {
+                        [alt setValue:[NSNumber numberWithBool:YES] forKey:@"final"];
+                    }
+                    NSLog(@"[sr] Empty final result; substituting last transcription");
+                    [self sendResults:@[self.lastAlternatives]];
+                } else {
+                    [self sendResults:@[alternatives]];
+                }
+
                 if ( result.isFinal ) {
                     if(self.speechStartSent) {
                         [self sendEvent:(NSString *)@"speechend"];
