@@ -16,6 +16,7 @@
 @property (assign) BOOL resetAudioEngine;
 @property (assign) BOOL sessionActive;
 
+@property (nonatomic, strong) dispatch_queue_t audioQueue;
 @property (nonatomic, strong) NSTimer *silenceTimer;
 @property (nonatomic) NSTimeInterval silenceThreshold;
 @property (nonatomic) float audioLevelThreshold;

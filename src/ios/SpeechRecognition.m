@@ -38,6 +38,14 @@
         self.sessionCategory = AVAudioSessionCategoryRecord;
     }
 
+    // Serial queue for all audio-engine work. Keeps the heavy setup/teardown
+    // off the Cordova bridge (main) thread — which triggers Cordova's
+    // "Plugin should use a background thread" warning and can jank the UI —
+    // while guaranteeing every audio-engine operation runs on one consistent
+    // thread. NOTE: the silence NSTimer must still be scheduled on the main
+    // run loop, so that scheduling stays on the main queue.
+    self.audioQueue = dispatch_queue_create("com.fisherlea.cordova.speech.audio", DISPATCH_QUEUE_SERIAL);
+
     self.resetAudioEngine = NO;
     self.audioEngine = [[AVAudioEngine alloc] init];
     self.audioSession = [AVAudioSession sharedInstance];
@@ -110,7 +118,9 @@
 
         // If we are currently running, we need to stop and release the
         // existing recognition tasks. Otherwise, nothing gets received.
-        [self stopAndRelease];
+        dispatch_async(self.audioQueue, ^{
+            [self stopAndRelease];
+        });
     }
 }
 
@@ -134,13 +144,15 @@
     self.command = command;
     [self sendEvent:(NSString *)@"start"];
 
-    if(self.resetAudioEngine) {
-        NSLog(@"[sr] Reseting audioEngine");
-        self.audioEngine = [self.audioEngine init];
-        self.resetAudioEngine = NO;
-    }
+    dispatch_async(self.audioQueue, ^{
+        if(self.resetAudioEngine) {
+            NSLog(@"[sr] Reseting audioEngine");
+            self.audioEngine = [self.audioEngine init];
+            self.resetAudioEngine = NO;
+        }
 
-    [self recognize];
+        [self recognize];
+    });
 }
 
 - (void) recognize
@@ -161,7 +173,7 @@
 
     if (speechStatus == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
         [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus status){
-            dispatch_async(dispatch_get_main_queue(), ^{
+            dispatch_async(self.audioQueue, ^{
                 if (status == SFSpeechRecognizerAuthorizationStatusAuthorized) {
                     [self ensureMicPermissionThenRecord:lang];
                 } else {
@@ -214,7 +226,7 @@
         [self sendErrorWithMessage:@"Microphone access is disabled for this app. Enable it in Settings for this app." andCode:4];
     } else {
         [self requestMicPermission:^(BOOL granted){
-            dispatch_async(dispatch_get_main_queue(), ^{
+            dispatch_async(self.audioQueue, ^{
                 if (granted) {
                     [self recordAndRecognizeWithLang:lang];
                 } else {
@@ -406,7 +418,9 @@
     NSLog(@"[sr] handleSilence()");
     if (self.isSpeaking) {
         self.isSpeaking = NO;
-        [self stopAndRelease];
+        dispatch_async(self.audioQueue, ^{
+            [self stopAndRelease];
+        });
     }
 }
 
@@ -574,14 +588,16 @@
 -(void) stopOrAbort
 {
     DBG(@"[sr] stopOrAbort()");
-    if (self.audioEngine.isRunning) {
-        [self.audioEngine stop];
-        [self sendEvent:(NSString *)@"audioend"];
+    dispatch_async(self.audioQueue, ^{
+        if (self.audioEngine.isRunning) {
+            [self.audioEngine stop];
+            [self sendEvent:(NSString *)@"audioend"];
 
-        if(self.recognitionRequest) {
-            [self.recognitionRequest endAudio];
+            if(self.recognitionRequest) {
+                [self.recognitionRequest endAudio];
+            }
         }
-    }
+    });
 }
 
 -(void) stopAndRelease
