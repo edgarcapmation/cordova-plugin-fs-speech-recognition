@@ -154,18 +154,74 @@
     self.silenceThreshold = [[self.command argumentAtIndex:4] floatValue];
     self.audioLevelThreshold = [[self.command argumentAtIndex:5] floatValue];
 
-    if (![self permissionIsSet]) {
+    // Pre-flight the two required per-app permissions before touching the audio
+    // engine, so a disabled toggle produces a clear, actionable error instead of
+    // a silent hang. Speech Recognition first, then Microphone.
+    SFSpeechRecognizerAuthorizationStatus speechStatus = [SFSpeechRecognizer authorizationStatus];
+
+    if (speechStatus == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
         [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus status){
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (status == SFSpeechRecognizerAuthorizationStatusAuthorized) {
-                    [self recordAndRecognizeWithLang:lang];
+                    [self ensureMicPermissionThenRecord:lang];
                 } else {
-                    [self sendErrorWithMessage:@"Permission not allowed" andCode:4];
+                    [self sendErrorWithMessage:@"Speech Recognition access was denied. Enable it in Settings for this app." andCode:4];
                 }
             });
         }];
+    } else if (speechStatus == SFSpeechRecognizerAuthorizationStatusAuthorized) {
+        [self ensureMicPermissionThenRecord:lang];
     } else {
+        // Denied or Restricted.
+        [self sendErrorWithMessage:@"Speech Recognition is disabled for this app. Enable it in Settings for this app." andCode:4];
+    }
+}
+
+// Returns the microphone record-permission state as: 0 = undetermined, 1 = denied, 2 = granted.
+- (int) micPermissionStatus
+{
+    if (@available(iOS 17.0, *)) {
+        switch ([AVAudioApplication sharedInstance].recordPermission) {
+            case AVAudioApplicationRecordPermissionGranted: return 2;
+            case AVAudioApplicationRecordPermissionDenied:  return 1;
+            default:                                        return 0;
+        }
+    } else {
+        switch (self.audioSession.recordPermission) {
+            case AVAudioSessionRecordPermissionGranted: return 2;
+            case AVAudioSessionRecordPermissionDenied:  return 1;
+            default:                                    return 0;
+        }
+    }
+}
+
+- (void) requestMicPermission:(void (^)(BOOL granted))handler
+{
+    if (@available(iOS 17.0, *)) {
+        [AVAudioApplication requestRecordPermissionWithCompletionHandler:^(BOOL granted){ handler(granted); }];
+    } else {
+        [self.audioSession requestRecordPermission:^(BOOL granted){ handler(granted); }];
+    }
+}
+
+// Verifies microphone access (requesting it if undetermined) before recording.
+- (void) ensureMicPermissionThenRecord:(NSString *) lang
+{
+    int mic = [self micPermissionStatus];
+    if (mic == 2) {
         [self recordAndRecognizeWithLang:lang];
+    } else if (mic == 1) {
+        [self sendErrorWithMessage:@"Microphone access is disabled for this app. Enable it in Settings for this app." andCode:4];
+    } else {
+        [self requestMicPermission:^(BOOL granted){
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (granted) {
+                    [self recordAndRecognizeWithLang:lang];
+                } else {
+                    [self sendErrorWithMessage:@"Microphone access was denied. Enable it in Settings for this app." andCode:4];
+                }
+            });
+        }];
     }
 }
 
@@ -178,11 +234,28 @@
         [self sendErrorWithMessage:@"The language is not supported" andCode:7];
     } else {
 
-        // Cancel the previous task if it's running.
+        // Fully tear down any in-progress session before starting a new one.
+        // installTapOnBus: asserts (and crashes) if a tap is already installed
+        // on the bus, so a second start() must stop the engine and remove the
+        // existing tap first, not just cancel the recognition task.
+        // Clearing sessionActive first makes any late callback from the old
+        // task a no-op while the new session is being set up.
+        self.sessionActive = NO;
         if ( self.recognitionTask ) {
             [self.recognitionTask cancel];
             self.recognitionTask = nil;
         }
+        if ( self.audioEngine.isRunning ) {
+            [self.audioEngine stop];
+        }
+        [self.audioEngine.inputNode removeTapOnBus:0];
+        if ( self.recognitionRequest ) {
+            [self.recognitionRequest endAudio];
+            self.recognitionRequest = nil;
+        }
+        [self.silenceTimer invalidate];
+        self.silenceTimer = nil;
+        self.isSpeaking = NO;
 
         [self initAudioSession];
 
@@ -201,8 +274,17 @@
 
             if (error) {
                 NSLog(@"[sr] resultHandler error (%d) %@", (int) error.code, error.description);
-                [self stopAndRelease];
-                [self sendErrorWithMessage:error.localizedDescription andCode:3];
+                if (self.sessionActive) {
+                    // Genuine error during an active session: report it, then end.
+                    [self sendRecognizerError:error];
+                    [self stopAndRelease];
+                } else {
+                    // Session already ended cleanly (e.g. silence auto-stop);
+                    // ignore a late-arriving error so we don't contradict a
+                    // successful result with a spurious failure.
+                    NSLog(@"[sr] Ignoring late error; session already ended");
+                }
+                return;
             }
 
             if(!self.speechStartSent) {
@@ -287,8 +369,22 @@
       }];
 
         [self.audioEngine prepare];
-        [self.audioEngine startAndReturnError:nil];
 
+        NSError *engineError = nil;
+        if (![self.audioEngine startAndReturnError:&engineError]) {
+            // Don't leave a dangling tap/request/task behind on failure.
+            NSLog(@"[sr] Unable to start audioEngine: %@", engineError);
+            [self.audioEngine.inputNode removeTapOnBus:0];
+            if (self.recognitionTask) {
+                [self.recognitionTask cancel];
+                self.recognitionTask = nil;
+            }
+            self.recognitionRequest = nil;
+            [self sendErrorWithMessage:@"Unable to start audio capture." andCode:2];
+            return;
+        }
+
+        self.sessionActive = YES;
         [self sendEvent:(NSString *)@"audiostart"];
     }
 }
@@ -324,12 +420,6 @@
     }
 }
 
-- (BOOL) permissionIsSet
-{
-    SFSpeechRecognizerAuthorizationStatus status = [SFSpeechRecognizer authorizationStatus];
-    return status != SFSpeechRecognizerAuthorizationStatusNotDetermined;
-}
-
 -(void) sendResults:(NSArray *) results
 {
     NSMutableDictionary * event = [[NSMutableDictionary alloc]init];
@@ -344,6 +434,54 @@
     [self.pluginResult setKeepCallbackAsBool:YES];
     [self.commandDelegate sendPluginResult:self.pluginResult callbackId:self.command.callbackId];
     DBG(@"[sr] sendResults() complete");
+}
+
+// Maps an SFSpeechRecognizer/kAFAssistantErrorDomain NSError to a W3C
+// SpeechRecognition error code and a human-readable, actionable message.
+// Error codes (see www/SpeechRecognitionError.js):
+//   0 no-speech, 1 aborted, 2 audio-capture, 3 network,
+//   4 not-allowed, 5 service-not-allowed, 6 bad-grammar, 7 language-not-supported
+-(void) sendRecognizerError:(NSError *)error
+{
+    NSInteger code = 3;                            // network: generic fallback (previous behavior)
+    NSString *message = error.localizedDescription;
+
+    NSString *dictationDisabledMessage = @"Speech recognition is unavailable because Dictation is disabled. Enable it in Settings > General > Keyboard > Enable Dictation.";
+
+    if ([error.domain isEqualToString:@"kLSRErrorDomain"]) {
+        switch (error.code) {
+            case 201:
+                // "Siri and Dictation are disabled" — the local speech
+                // recognition service is turned off at the OS level.
+                code = 5;                          // service-not-allowed
+                message = dictationDisabledMessage;
+                break;
+            default:
+                break;
+        }
+    } else if ([error.domain isEqualToString:@"kAFAssistantErrorDomain"]) {
+        switch (error.code) {
+            case 1101:
+                // Assistant-side variant of "Siri and Dictation are disabled".
+                code = 5;                          // service-not-allowed
+                message = dictationDisabledMessage;
+                break;
+            case 1110:
+                // No speech was detected by the recognizer.
+                code = 0;                          // no-speech
+                break;
+            case 203:
+            case 216:
+            case 1700:
+                // Request was cancelled/aborted.
+                code = 1;                          // aborted
+                break;
+            default:
+                break;
+        }
+    }
+
+    [self sendErrorWithMessage:message andCode:code];
 }
 
 -(void) sendErrorWithMessage:(NSString *)errorMessage andCode:(NSInteger) code
@@ -382,6 +520,57 @@
     [self stopOrAbort];
 }
 
+// Shared opener: tries `primary`; if it can't be opened and `fallback` is
+// non-nil, tries `fallback`. Reports OK/ERROR back to the given command.
+-(void) openSettingsURL:(NSURL *)primary fallback:(NSURL *)fallback forCommand:(CDVInvokedUrlCommand*)command
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIApplication *app = [UIApplication sharedApplication];
+
+        void (^finish)(BOOL) = ^(BOOL success) {
+            CDVPluginResult *result = success
+                ? [CDVPluginResult resultWithStatus:CDVCommandStatus_OK]
+                : [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Unable to open Settings."];
+            [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+        };
+
+        [app openURL:primary options:@{} completionHandler:^(BOOL opened) {
+            if (opened || fallback == nil) {
+                finish(opened);
+            } else {
+                NSLog(@"[sr] Primary settings URL failed; falling back");
+                [app openURL:fallback options:@{} completionHandler:^(BOOL openedFallback) {
+                    finish(openedFallback);
+                }];
+            }
+        }];
+    });
+}
+
+// Opens iOS Settings, deep-linking toward the General/Keyboard area (where the
+// global "Enable Dictation" toggle lives) when the OS honors it, otherwise the
+// root Settings page. The deep link uses a private URL scheme and is only
+// appropriate for in-house (non-App-Store) distribution. Use this for the
+// "Siri and Dictation are disabled" (service-not-allowed) case.
+-(void) openSettings:(CDVInvokedUrlCommand*)command
+{
+    NSLog(@"[sr] openSettings()");
+    [self openSettingsURL:[NSURL URLWithString:@"App-Prefs:root=General"]
+                 fallback:[NSURL URLWithString:@"App-Prefs:"]
+               forCommand:command];
+}
+
+// Opens this app's own page in Settings using the documented API. This is where
+// the per-app Microphone and Speech Recognition permission toggles live. Use
+// this for the not-allowed (permission denied) case.
+-(void) openAppSettings:(CDVInvokedUrlCommand*)command
+{
+    NSLog(@"[sr] openAppSettings()");
+    [self openSettingsURL:[NSURL URLWithString:UIApplicationOpenSettingsURLString]
+                 fallback:nil
+               forCommand:command];
+}
+
 -(void) stopOrAbort
 {
     DBG(@"[sr] stopOrAbort()");
@@ -398,6 +587,14 @@
 -(void) stopAndRelease
 {
     DBG(@"[sr] stopAndRelease()");
+
+    // Idempotent: a session ends exactly once. Guards against duplicate
+    // audioend/end events when both the silence timer and a late recognizer
+    // callback try to tear the same session down.
+    if (!self.sessionActive) {
+        return;
+    }
+    self.sessionActive = NO;
 
     [self.silenceTimer invalidate];
     self.silenceTimer = nil;

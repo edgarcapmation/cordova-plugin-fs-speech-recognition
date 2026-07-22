@@ -115,4 +115,20 @@ SpeechRecognition.prototype.abort = function() {
     exec(null, null, "SpeechRecognition", "abort", []);
 };
 
+// Opens iOS Settings, deep-linking toward the General/Keyboard area (where the
+// global "Enable Dictation" toggle lives) when the OS allows it, otherwise the
+// root Settings page. Use for the "service-not-allowed" (Dictation disabled)
+// case. success/error callbacks are optional. iOS only; a no-op elsewhere.
+SpeechRecognition.prototype.openSettings = function(success, error) {
+    exec(success, error, "SpeechRecognition", "openSettings", []);
+};
+
+// Opens this app's own page in iOS Settings (documented API), where the
+// per-app Microphone and Speech Recognition toggles live. Use for the
+// "not-allowed" (permission denied) case. success/error callbacks are
+// optional. iOS only; a no-op elsewhere.
+SpeechRecognition.prototype.openAppSettings = function(success, error) {
+    exec(success, error, "SpeechRecognition", "openAppSettings", []);
+};
+
 module.exports = SpeechRecognition;

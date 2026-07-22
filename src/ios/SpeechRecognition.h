@@ -14,6 +14,7 @@
 @property (assign) NSString *sessionCategory;
 @property (assign) BOOL speechStartSent;
 @property (assign) BOOL resetAudioEngine;
+@property (assign) BOOL sessionActive;
 
 @property (nonatomic, strong) NSTimer *silenceTimer;
 @property (nonatomic) NSTimeInterval silenceThreshold;
@@ -24,5 +25,7 @@
 - (void) start:(CDVInvokedUrlCommand*)command;
 - (void) stop:(CDVInvokedUrlCommand*)command;
 - (void) abort:(CDVInvokedUrlCommand*)command;
+- (void) openSettings:(CDVInvokedUrlCommand*)command;
+- (void) openAppSettings:(CDVInvokedUrlCommand*)command;
 
 @end
