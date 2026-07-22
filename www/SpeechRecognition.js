@@ -15,7 +15,7 @@ var SpeechRecognition = function () {
     this.interimResults = false;
     this.maxAlternatives = 1;
     this.serviceURI = "";
-    this.silenceThreshold = 2; // seconds of silence before stopping
+    this.silenceThreshold = 4; // seconds of silence before stopping
     this.audioLevelThreshold = 0.005; // minimum audio level below which the silence threshold is met
 
     // event methods
